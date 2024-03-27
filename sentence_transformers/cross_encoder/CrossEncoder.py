@@ -138,6 +138,30 @@ class CrossEncoder:
             tokenized[name] = tokenized[name].to(self._target_device)
 
         return tokenized
+    
+    def lce_batching_collate(self, batch):
+        # For training with LCE loss, expects List[List[InputExample]]
+        texts = [[] for _ in range(len(batch[0][0].texts))]
+        labels = []
+
+        for item in batch:
+            for example in item:
+                for idx, text in enumerate(example.texts):
+                    texts[idx].append(text.strip())
+
+                labels.append(example.label)
+
+        tokenized = self.tokenizer(
+            *texts, padding=True, truncation="longest_first", return_tensors="pt", max_length=self.max_length
+        )
+        labels = torch.tensor(labels, dtype=torch.float).to(
+            self._target_device
+        )
+
+        for name in tokenized:
+            tokenized[name] = tokenized[name].to(self._target_device)
+
+        return tokenized, labels
 
     def fit(
         self,
@@ -158,6 +182,7 @@ class CrossEncoder:
         use_amp: bool = False,
         callback: Callable[[float, int, int], None] = None,
         show_progress_bar: bool = True,
+        use_lce: bool = False,
     ):
         """
         Train the model with the given training objective
@@ -185,7 +210,10 @@ class CrossEncoder:
                 `score`, `epoch`, `steps`
         :param show_progress_bar: If True, output a tqdm progress bar
         """
-        train_dataloader.collate_fn = self.smart_batching_collate
+        if use_lce:
+            train_dataloader.collate_fn = self.lce_batching_collate
+        else:
+            train_dataloader.collate_fn = self.smart_batching_collate
 
         if use_amp:
             if is_torch_npu_available():
@@ -348,94 +376,6 @@ class CrossEncoder:
             pred_scores = pred_scores[0]
 
         return pred_scores
-
-    def rank(
-        self,
-        query: str,
-        documents: List[str],
-        top_k: Optional[int] = None,
-        return_documents: bool = False,
-        batch_size: int = 32,
-        show_progress_bar: bool = None,
-        num_workers: int = 0,
-        activation_fct=None,
-        apply_softmax=False,
-        convert_to_numpy: bool = True,
-        convert_to_tensor: bool = False,
-    ) -> List[Dict]:
-        """
-        Performs ranking with the CrossEncoder on the given query and documents. Returns a sorted list with the document indices and scores.
-
-        Example:
-            ::
-
-                from sentence_transformers import CrossEncoder
-                model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-
-                query = "Who wrote 'To Kill a Mockingbird'?"
-                documents = [
-                    "'To Kill a Mockingbird' is a novel by Harper Lee published in 1960. It was immediately successful, winning the Pulitzer Prize, and has become a classic of modern American literature.",
-                    "The novel 'Moby-Dick' was written by Herman Melville and first published in 1851. It is considered a masterpiece of American literature and deals with complex themes of obsession, revenge, and the conflict between good and evil.",
-                    "Harper Lee, an American novelist widely known for her novel 'To Kill a Mockingbird', was born in 1926 in Monroeville, Alabama. She received the Pulitzer Prize for Fiction in 1961.",
-                    "Jane Austen was an English novelist known primarily for her six major novels, which interpret, critique and comment upon the British landed gentry at the end of the 18th century.",
-                    "The 'Harry Potter' series, which consists of seven fantasy novels written by British author J.K. Rowling, is among the most popular and critically acclaimed books of the modern era.",
-                    "'The Great Gatsby', a novel written by American author F. Scott Fitzgerald, was published in 1925. The story is set in the Jazz Age and follows the life of millionaire Jay Gatsby and his pursuit of Daisy Buchanan."
-                ]
-
-                model.rank(query, documents, return_documents=True)
-
-            ::
-
-                [{'corpus_id': 0,
-                'score': 10.67858,
-                'text': "'To Kill a Mockingbird' is a novel by Harper Lee published in 1960. It was immediately successful, winning the Pulitzer Prize, and has become a classic of modern American literature."},
-                {'corpus_id': 2,
-                'score': 9.761677,
-                'text': "Harper Lee, an American novelist widely known for her novel 'To Kill a Mockingbird', was born in 1926 in Monroeville, Alabama. She received the Pulitzer Prize for Fiction in 1961."},
-                {'corpus_id': 1,
-                'score': -3.3099542,
-                'text': "The novel 'Moby-Dick' was written by Herman Melville and first published in 1851. It is considered a masterpiece of American literature and deals with complex themes of obsession, revenge, and the conflict between good and evil."},
-                {'corpus_id': 5,
-                'score': -4.8989105,
-                'text': "'The Great Gatsby', a novel written by American author F. Scott Fitzgerald, was published in 1925. The story is set in the Jazz Age and follows the life of millionaire Jay Gatsby and his pursuit of Daisy Buchanan."},
-                {'corpus_id': 4,
-                'score': -5.082967,
-                'text': "The 'Harry Potter' series, which consists of seven fantasy novels written by British author J.K. Rowling, is among the most popular and critically acclaimed books of the modern era."}]
-
-        :param query: A single query
-        :param documents: A list of documents
-        :param top_k: Return the top-k documents. If None, all documents are returned.
-        :param return_documents: If True, also returns the documents. If False, only returns the indices and scores.
-        :param batch_size: Batch size for encoding
-        :param show_progress_bar: Output progress bar
-        :param num_workers: Number of workers for tokenization
-        :param activation_fct: Activation function applied on the logits output of the CrossEncoder. If None, nn.Sigmoid() will be used if num_labels=1, else nn.Identity
-        :param convert_to_numpy: Convert the output to a numpy matrix.
-        :param apply_softmax: If there are more than 2 dimensions and apply_softmax=True, applies softmax on the logits output
-        :param convert_to_tensor: Convert the output to a tensor.
-        :return: A sorted list with the document indices and scores, and optionally also documents.
-        """
-        query_doc_pairs = [[query, doc] for doc in documents]
-        scores = self.predict(
-            query_doc_pairs,
-            batch_size=batch_size,
-            show_progress_bar=show_progress_bar,
-            num_workers=num_workers,
-            activation_fct=activation_fct,
-            apply_softmax=apply_softmax,
-            convert_to_numpy=convert_to_numpy,
-            convert_to_tensor=convert_to_tensor,
-        )
-
-        results = []
-        for i in range(len(scores)):
-            if return_documents:
-                results.append({"corpus_id": i, "score": scores[i], "text": documents[i]})
-            else:
-                results.append({"corpus_id": i, "score": scores[i]})
-
-        results = sorted(results, key=lambda x: x["score"], reverse=True)
-        return results[:top_k]
 
     def _eval_during_training(self, evaluator, output_path, save_best_model, epoch, steps, callback):
         """Runs evaluation during the training"""
