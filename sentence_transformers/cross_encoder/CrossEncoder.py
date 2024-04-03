@@ -251,8 +251,8 @@ class CrossEncoder:
             loss_fct = nn.BCEWithLogitsLoss() if self.config.num_labels == 1 else nn.CrossEntropyLoss()
 
         skip_scheduler = False
+        training_steps = 0
         for epoch in trange(epochs, desc="Epoch", disable=not show_progress_bar):
-            training_steps = 0
             self.model.zero_grad()
             self.model.train()
 
@@ -292,7 +292,7 @@ class CrossEncoder:
 
                 training_steps += 1
 
-                if evaluator is not None and evaluation_steps > 0 and training_steps % evaluation_steps == 0:
+                if evaluator is not None and evaluation_steps > 0 and training_steps % evaluation_steps == 0 and training_steps % len(train_dataloader) != 0:
                     self._eval_during_training(
                         evaluator, output_path, save_best_model, epoch, training_steps, callback
                     )
